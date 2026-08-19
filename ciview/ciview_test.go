@@ -63,8 +63,53 @@ func TestRenderIndexGolden(t *testing.T) {
 	t0 := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	got, err := RenderIndex([]otelstore.TraceSummary{{
 		TraceID:     "00112233445566778899aabbccddeeff",
-		ServiceName: "dagger",
-		Name:        "build",
+		ServiceName: "dagger-cli",
+		Name:        "check --source=.",
+		StartTime:   t0,
+		EndTime:     t0.Add(90 * time.Second),
+		StatusCode:  1,
+		ResourceAttributes: map[string]string{
+			"ci.repo":   "guettli/agentloop",
+			"ci.branch": "main",
+			"ci.commit": "97b256d5ea92c7ebf68ebadcab2a532276a3bf52",
+		},
+	}, {
+		// Dagger's own keys, for a producer whose workflow sets no ci.*.
+		TraceID:     "ffeeddccbbaa99887766554433221100",
+		ServiceName: "dagger-cli",
+		Name:        "check",
+		StartTime:   t0.Add(-time.Minute),
+		EndTime:     t0.Add(-time.Second),
+		StatusCode:  2,
+		ResourceAttributes: map[string]string{
+			"dagger.io/vcs.repo.full_name": "guettli/sharedinbox",
+			"dagger.io/git.branch":         "main",
+			"dagger.io/git.ref":            "2daef76413cf43e9c753a2a7fbeaf9391c9f3f9d",
+		},
+	}, {
+		// No provenance at all — the row still renders, the cells are blank.
+		TraceID:     "aaaabbbbccccddddeeeeffff00001111",
+		ServiceName: "agentloop",
+		Name:        "tick",
+		StartTime:   t0.Add(-2 * time.Minute),
+		EndTime:     t0.Add(-119 * time.Second),
+		StatusCode:  1,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkGolden(t, "index.html", got)
+}
+
+// With no producer carrying provenance, the repo / branch / commit columns are
+// not rendered at all — an otelhouseview deployment whose traces are not CI
+// pipelines should not get three permanently empty columns.
+func TestRenderIndexOmitsVCSColumnsWhenAbsent(t *testing.T) {
+	t0 := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	got, err := RenderIndex([]otelstore.TraceSummary{{
+		TraceID:     "00112233445566778899aabbccddeeff",
+		ServiceName: "agentloop",
+		Name:        "tick",
 		StartTime:   t0,
 		EndTime:     t0.Add(2 * time.Second),
 		StatusCode:  1,
@@ -72,7 +117,25 @@ func TestRenderIndexGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkGolden(t, "index.html", got)
+	for _, col := range []string{"<th>repo</th>", "<th>branch</th>", "<th>commit</th>"} {
+		if strings.Contains(string(got), col) {
+			t.Errorf("index rendered %s with no provenance in the data", col)
+		}
+	}
+}
+
+func TestShortSHA(t *testing.T) {
+	for in, want := range map[string]string{
+		"97b256d5ea92c7ebf68ebadcab2a532276a3bf52": "97b256d",
+		"main":   "main",
+		"v1.2.3": "v1.2.3",
+		"":       "",
+		"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+	} {
+		if got := shortSHA(in); got != want {
+			t.Errorf("shortSHA(%q) = %q, want %q", in, got, want)
+		}
+	}
 }
 
 func TestRenderTraceEmptyIndex(t *testing.T) {

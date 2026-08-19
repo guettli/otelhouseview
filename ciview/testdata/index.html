@@ -37,6 +37,7 @@
     min-height: 100vh;
   }
   code { font-family: var(--mono); }
+  td.vcs { color: var(--text-muted); white-space: nowrap; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; }
   h1 { font-size: 1.4rem; font-weight: 600; margin: 0 0 1.25rem 0; letter-spacing: -0.01em; }
   .card {
     background: var(--bg-elev);
@@ -107,17 +108,56 @@
 <div class="card">
 <table>
   <thead>
-    <tr><th>status</th><th>service</th><th>pipeline</th><th>started</th><th>duration</th><th>trace</th></tr>
+    <tr>
+      <th>status</th>
+      <th>service</th>
+      <th>pipeline</th>
+      <th>repo</th><th>branch</th><th>commit</th>
+      <th>started</th><th>duration</th><th>trace</th>
+    </tr>
   </thead>
   <tbody>
   
     <tr>
       <td class="status"><span class="status-pill ok">ok</span></td>
-      <td>dagger</td>
-      <td>build</td>
+      <td>dagger-cli</td>
+      <td>check --source=.</td>
+      
+      <td class="vcs">guettli/agentloop</td>
+      <td class="vcs">main</td>
+      <td class="vcs"><code title="97b256d5ea92c7ebf68ebadcab2a532276a3bf52">97b256d</code></td>
+      
       <td>2026-06-01 12:00:00 UTC</td>
-      <td>2s</td>
+      <td>1m30s</td>
       <td class="trace"><a href="./00112233445566778899aabbccddeeff"><code>00112233445566778899aabbccddeeff</code></a></td>
+    </tr>
+  
+    <tr>
+      <td class="status"><span class="status-pill error">error</span></td>
+      <td>dagger-cli</td>
+      <td>check</td>
+      
+      <td class="vcs">guettli/sharedinbox</td>
+      <td class="vcs">main</td>
+      <td class="vcs"><code title="2daef76413cf43e9c753a2a7fbeaf9391c9f3f9d">2daef76</code></td>
+      
+      <td>2026-06-01 11:59:00 UTC</td>
+      <td>59s</td>
+      <td class="trace"><a href="./ffeeddccbbaa99887766554433221100"><code>ffeeddccbbaa99887766554433221100</code></a></td>
+    </tr>
+  
+    <tr>
+      <td class="status"><span class="status-pill ok">ok</span></td>
+      <td>agentloop</td>
+      <td>tick</td>
+      
+      <td class="vcs"></td>
+      <td class="vcs"></td>
+      <td class="vcs"></td>
+      
+      <td>2026-06-01 11:58:00 UTC</td>
+      <td>1s</td>
+      <td class="trace"><a href="./aaaabbbbccccddddeeeeffff00001111"><code>aaaabbbbccccddddeeeeffff00001111</code></a></td>
     </tr>
   
   </tbody>
