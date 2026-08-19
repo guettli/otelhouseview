@@ -66,33 +66,80 @@ func (m *MemoryStore) GetTrace(_ context.Context, traceID string) (Trace, error)
 	return out, nil
 }
 
-// ListTraces implements Store. Iterates every span once; acceptable because
-// MemoryStore is only used in tests.
-func (m *MemoryStore) ListTraces(_ context.Context, limit int) ([]TraceSummary, error) {
+// ListTraces implements Store.
+func (m *MemoryStore) ListTraces(ctx context.Context, limit int) ([]TraceSummary, error) {
+	return m.ListTracesFiltered(ctx, ListOptions{Limit: limit})
+}
+
+// ListTracesFiltered implements Store. Iterates every span once per call;
+// acceptable because MemoryStore is only used in tests.
+func (m *MemoryStore) ListTracesFiltered(_ context.Context, opts ListOptions) ([]TraceSummary, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var roots []Span
+
+	byTrace := map[string][]Span{}
 	for _, s := range m.spans {
-		if s.IsRoot() {
-			roots = append(roots, s)
+		if !opts.Since.IsZero() && s.StartTime.Before(opts.Since) {
+			continue
 		}
+		byTrace[s.TraceID] = append(byTrace[s.TraceID], s)
 	}
-	sort.Slice(roots, func(i, j int) bool { return roots[i].StartTime.After(roots[j].StartTime) })
-	if limit > 0 && len(roots) > limit {
-		roots = roots[:limit]
-	}
-	out := make([]TraceSummary, 0, len(roots))
-	for _, r := range roots {
-		out = append(out, TraceSummary{
-			TraceID:     r.TraceID,
-			ServiceName: r.ServiceName,
-			Name:        r.Name,
-			StartTime:   r.StartTime,
-			EndTime:     r.EndTime,
-			StatusCode:  r.StatusCode,
+
+	summaries := make([]TraceSummary, 0, len(byTrace))
+	for id, spans := range byTrace {
+		if !matchesAttrKeys(spans, opts.ResourceAttrKeys) {
+			continue
+		}
+		t := Trace{TraceID: id, Spans: spans}
+		root, ok := t.Root()
+		if !ok {
+			continue
+		}
+		start, end := root.StartTime, root.EndTime
+		for _, s := range spans {
+			if s.StartTime.Before(start) {
+				start = s.StartTime
+			}
+			if s.EndTime.After(end) {
+				end = s.EndTime
+			}
+		}
+		summaries = append(summaries, TraceSummary{
+			TraceID:            id,
+			ServiceName:        root.ServiceName,
+			Name:               root.Name,
+			StartTime:          start,
+			EndTime:            end,
+			StatusCode:         root.StatusCode,
+			ResourceAttributes: root.ResourceAttributes,
 		})
 	}
-	return out, nil
+	sort.Slice(summaries, func(i, j int) bool { return summaries[i].StartTime.After(summaries[j].StartTime) })
+
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if len(summaries) > limit {
+		summaries = summaries[:limit]
+	}
+	return summaries, nil
+}
+
+// matchesAttrKeys reports whether any span carries any of keys as a resource
+// attribute. No keys means no filter.
+func matchesAttrKeys(spans []Span, keys []string) bool {
+	if len(keys) == 0 {
+		return true
+	}
+	for _, s := range spans {
+		for _, k := range keys {
+			if _, ok := s.ResourceAttributes[k]; ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Close implements Store.

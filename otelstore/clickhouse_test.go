@@ -138,15 +138,78 @@ VALUES (?, ?, ?, 'INFO', 9, 'dagger', 'PASS: TestSomething',
 		t.Errorf("logs not read back: %+v", got.Logs)
 	}
 
+	// A second trace in the shape a CI workflow produces: every span names a
+	// parent that was minted outside the store (an injected TRACEPARENT), so
+	// no span here has an empty ParentSpanId.
+	ciTraceID := "aabbccddeeff00112233445566778899"
+	mustExec(fmt.Sprintf(`
+INSERT INTO %s
+    (Timestamp, TraceId, SpanId, ParentSpanId, SpanName, SpanKind, ServiceName,
+     ResourceAttributes, SpanAttributes, Duration, StatusCode, StatusMessage)
+VALUES (?, ?, ?, ?, ?, 'Internal', ?,
+        map('service.name','dagger-cli','ci.commit','deadbeef','ci.repo','guettli/agentloop'),
+        map(), ?, 'Ok', '')`, store.tracesTable),
+		t0.Add(time.Minute), ciTraceID, "1111111111111111", "9999999999999999",
+		"check --source=.", "dagger-cli", int64(30*time.Second),
+	)
+	// ...and a span from a second producer in the same trace, whose own
+	// resource knows nothing about CI. The trace must still match a ci.commit
+	// filter: membership is per trace, not per span.
+	mustExec(fmt.Sprintf(`
+INSERT INTO %s
+    (Timestamp, TraceId, SpanId, ParentSpanId, SpanName, SpanKind, ServiceName,
+     ResourceAttributes, SpanAttributes, Duration, StatusCode, StatusMessage)
+VALUES (?, ?, ?, ?, ?, 'Internal', ?, map('service.name','dagger-engine'),
+        map(), ?, 'Ok', '')`, store.tracesTable),
+		t0.Add(70*time.Second), ciTraceID, "2222222222222222", "1111111111111111",
+		"exec", "dagger-engine", int64(50*time.Second),
+	)
+
 	summaries, err := store.ListTraces(ctx, 10)
 	if err != nil {
 		t.Fatalf("ListTraces: %v", err)
 	}
-	if len(summaries) != 1 || summaries[0].TraceID != traceID {
-		t.Fatalf("ListTraces = %+v, want one row for %s", summaries, traceID)
+	if len(summaries) != 2 {
+		t.Fatalf("ListTraces = %+v, want both traces", summaries)
 	}
-	if summaries[0].Name != "build" {
-		t.Errorf("summary name = %q, want build", summaries[0].Name)
+	// Newest first, and the externally-parented trace is listed at all —
+	// selecting on ParentSpanId = '' used to drop it.
+	if summaries[0].TraceID != ciTraceID || summaries[1].TraceID != traceID {
+		t.Fatalf("ListTraces order = %s,%s; want %s,%s",
+			summaries[0].TraceID, summaries[1].TraceID, ciTraceID, traceID)
+	}
+	if summaries[1].Name != "build" {
+		t.Errorf("summary name = %q, want build", summaries[1].Name)
+	}
+	// The earliest span stands in for the missing root...
+	if summaries[0].Name != "check --source=." || summaries[0].ServiceName != "dagger-cli" {
+		t.Errorf("effective root = %q/%q, want check --source=./dagger-cli",
+			summaries[0].Name, summaries[0].ServiceName)
+	}
+	// ...while the duration spans the whole trace: the CLI span starts at
+	// t0+60s and the engine span ends at t0+120s.
+	if d := summaries[0].EndTime.Sub(summaries[0].StartTime); d != 60*time.Second {
+		t.Errorf("CI trace duration = %s, want 60s", d)
+	}
+	if summaries[0].ResourceAttributes["ci.commit"] != "deadbeef" {
+		t.Errorf("summary resource attributes = %+v, want ci.commit=deadbeef",
+			summaries[0].ResourceAttributes)
+	}
+
+	filtered, err := store.ListTracesFiltered(ctx, ListOptions{ResourceAttrKeys: []string{"ci.commit"}})
+	if err != nil {
+		t.Fatalf("ListTracesFiltered: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].TraceID != ciTraceID {
+		t.Fatalf("filtered listing = %+v, want only %s", filtered, ciTraceID)
+	}
+
+	since, err := store.ListTracesFiltered(ctx, ListOptions{Since: t0.Add(30 * time.Second)})
+	if err != nil {
+		t.Fatalf("ListTracesFiltered(Since): %v", err)
+	}
+	if len(since) != 1 || since[0].TraceID != ciTraceID {
+		t.Fatalf("Since listing = %+v, want only %s", since, ciTraceID)
 	}
 
 	if _, err := store.GetTrace(ctx, "missingtrace"); !errors.Is(err, ErrNotFound) {
