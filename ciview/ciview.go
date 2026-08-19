@@ -255,6 +255,10 @@ type traceView struct {
 	Orphans  []*SpanNode
 	Duration time.Duration
 	HasRoot  bool
+	// ExternalParent is set when the trace's top span names a parent that is
+	// not in the store. That span is rendered as the root: the parent is not
+	// late, it was never exported.
+	ExternalParent bool
 }
 
 // RenderTrace produces the standalone HTML page for a single trace. It does
@@ -262,21 +266,51 @@ type traceView struct {
 // snapshot it as a static file.
 func RenderTrace(trace otelstore.Trace) ([]byte, error) {
 	root, orphans := buildTree(trace)
-	view := traceView{TraceID: trace.TraceID, Root: root, Orphans: orphans}
+	// One orphan and no root is not a partial trace, it is a whole trace whose
+	// parent context was minted elsewhere — a CI workflow injecting its own
+	// TRACEPARENT produces exactly this, and the parent it names will never
+	// arrive. Render that span as the root instead of telling the reader to
+	// wait for something that is not coming.
+	externalParent := false
+	if root == nil && len(orphans) == 1 {
+		root, orphans, externalParent = orphans[0], nil, true
+	}
+	view := traceView{TraceID: trace.TraceID, Root: root, Orphans: orphans, ExternalParent: externalParent}
 	if root != nil {
 		view.HasRoot = true
-		view.Duration = root.Span.Duration()
 		view.Flat = flatten(root)
 	}
 	for _, o := range orphans {
 		view.Flat = append(view.Flat, flatten(o)...)
 	}
+	// The wall clock of everything rendered, not the root span's own duration:
+	// identical for a well-formed trace (the root encloses its children) and
+	// correct for one that is still missing spans.
+	view.Duration = spanWindow(view.Flat)
 	layoutWaterfall(view.Flat)
 	var buf bytes.Buffer
 	if err := traceTmpl.Execute(&buf, view); err != nil {
 		return nil, fmt.Errorf("ciview: render trace: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// spanWindow returns the wall clock from the earliest span start to the latest
+// span end across nodes.
+func spanWindow(nodes []*SpanNode) time.Duration {
+	var start, end time.Time
+	for _, n := range nodes {
+		if start.IsZero() || n.Span.StartTime.Before(start) {
+			start = n.Span.StartTime
+		}
+		if end.IsZero() || n.Span.EndTime.After(end) {
+			end = n.Span.EndTime
+		}
+	}
+	if start.IsZero() {
+		return 0
+	}
+	return end.Sub(start)
 }
 
 // layoutWaterfall assigns each node its OffsetPct and WidthPct against the

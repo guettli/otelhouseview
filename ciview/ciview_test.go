@@ -283,6 +283,48 @@ func TestSeverityClass(t *testing.T) {
 	}
 }
 
+// One top span naming a parent that is not in the store is a *whole* trace
+// whose context was minted elsewhere — a CI workflow injecting its own
+// TRACEPARENT. The page renders it as the root; telling the reader to wait for
+// a root span that will never be exported is worse than no message at all.
+func TestRenderTraceWithExternallyMintedParent(t *testing.T) {
+	t0 := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	tr := otelstore.Trace{
+		TraceID: "abc",
+		Spans: []otelstore.Span{{
+			TraceID:      "abc",
+			SpanID:       "top",
+			ParentSpanID: "minted-by-the-workflow",
+			Name:         "check --source=.",
+			ServiceName:  "dagger-cli",
+			StartTime:    t0,
+			EndTime:      t0.Add(70 * time.Second),
+		}, {
+			TraceID:      "abc",
+			SpanID:       "child",
+			ParentSpanID: "top",
+			Name:         "go test",
+			StartTime:    t0.Add(time.Second),
+			EndTime:      t0.Add(60 * time.Second),
+		}},
+	}
+	got, err := RenderTrace(tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(got)
+	if strings.Contains(s, "root span not yet exported") {
+		t.Errorf("partial-trace notice shown for an externally-parented trace")
+	}
+	for _, want := range []string{"check --source=.", "dagger-cli", "parent context minted outside the trace", "1m10s"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("rendered output missing %q", want)
+		}
+	}
+}
+
+// Two unconnected orphans and no root is a genuinely partial trace: spans are
+// still arriving, or some were dropped. The notice stays.
 func TestRenderTraceWithoutRoot(t *testing.T) {
 	t0 := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
 	tr := otelstore.Trace{
@@ -294,6 +336,13 @@ func TestRenderTraceWithoutRoot(t *testing.T) {
 			Name:         "only-child",
 			StartTime:    t0,
 			EndTime:      t0.Add(time.Second),
+		}, {
+			TraceID:      "abc",
+			SpanID:       "child2",
+			ParentSpanID: "also-missing",
+			Name:         "other-child",
+			StartTime:    t0.Add(time.Second),
+			EndTime:      t0.Add(2 * time.Second),
 		}},
 	}
 	got, err := RenderTrace(tr)
@@ -304,8 +353,8 @@ func TestRenderTraceWithoutRoot(t *testing.T) {
 	if !strings.Contains(s, "root span not yet exported") {
 		t.Errorf("expected partial-trace notice, got: %s", s)
 	}
-	if !strings.Contains(s, "only-child") {
-		t.Errorf("orphan child not rendered")
+	if !strings.Contains(s, "only-child") || !strings.Contains(s, "other-child") {
+		t.Errorf("orphan children not rendered")
 	}
 }
 

@@ -362,6 +362,7 @@
   <span class="sep">·</span> <span>duration: {{ fmtDuration .Duration }}</span>
   <span class="sep">·</span> <span>started: {{ fmtTime .Root.Span.StartTime }}</span>
   <span class="sep">·</span> <span>ended: {{ fmtTime .Root.Span.EndTime }}</span>
+  {{ if .ExternalParent }}<span class="sep">·</span> <span title="This span names a parent that was never exported — the trace context was minted outside the pipeline, e.g. a CI workflow's TRACEPARENT.">parent context minted outside the trace</span>{{ end }}
   {{ if .Root.Span.StatusMessage }}<div class="msg">{{ .Root.Span.StatusMessage }}</div>{{ end }}
 </div>
 {{ else }}
