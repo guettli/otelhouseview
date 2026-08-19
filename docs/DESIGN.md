@@ -97,8 +97,8 @@ saved_query(id, name, description, sql_template, params_json, default_viz,
 Three packages are **exported API with external consumers**:
 
 - **`otelstore/`** — read-only, typed ClickHouse client for the stock
-  clickhouseexporter schema (`Store`, `GetTrace`, `ListTraces`, plus
-  `MemoryStore` as the in-process fake).
+  clickhouseexporter schema (`Store`, `GetTrace`, `ListTraces`,
+  `ListTracesFiltered`, plus `MemoryStore` as the in-process fake).
 - **`ciview/`** — renders a trace as a self-contained HTML page
   (`RenderTrace`, `RenderIndex`).
 - **`explore/`** — the SQL workbench as an embeddable sub-application. Public

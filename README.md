@@ -96,7 +96,21 @@ import "github.com/guettli/otelhouseview/otelstore"
 store, err := otelstore.OpenClickHouse(ctx, dsn) // dsn = a read-only CH user
 trace, err := store.GetTrace(ctx, traceID)       // spans + logs, one trace
 recent, err := store.ListTraces(ctx, 50)         // newest-first summaries
+
+// ...or narrow the listing to one kind of producer. ResourceAttrKeys matches
+// on key *presence*, so "traces from a CI pipeline" needs no value list:
+ci, err := store.ListTracesFiltered(ctx, otelstore.ListOptions{
+    Limit:            50,
+    ResourceAttrKeys: []string{"ci.commit"},
+    Since:            time.Now().Add(-14 * 24 * time.Hour),
+})
 ```
+
+A listing is assembled per trace, not by selecting the span whose parent is
+empty. A trace whose parent context was minted outside the store — what a CI
+workflow produces when it injects its own `TRACEPARENT` — has no such span,
+and is listed all the same, with its earliest span standing in for the root
+and its duration spanning the whole run.
 
 `MemoryStore` is the in-process fake, so consumers can test their rendering
 without a live ClickHouse.

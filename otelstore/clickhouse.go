@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2" // registers the "clickhouse" driver with database/sql
@@ -173,22 +174,80 @@ ORDER BY Timestamp`, c.logsTable)
 	return out, nil
 }
 
-// ListTraces implements Store. The contrib schema does not carry a "is root"
-// flag, so the query filters for rows whose ParentSpanId is the empty string.
-// This is a full scan today — acceptable while CI volume is small; a
-// materialised view is the upgrade path once it stops being.
+// ListTraces implements Store.
 func (c *ClickHouseStore) ListTraces(ctx context.Context, limit int) ([]TraceSummary, error) {
+	return c.ListTracesFiltered(ctx, ListOptions{Limit: limit})
+}
+
+// ListTracesFiltered implements Store.
+//
+// The listing is built by aggregating each trace's spans rather than by
+// selecting the row whose ParentSpanId is empty, which is what this used to
+// do. That earlier query silently lost every trace whose parent context was
+// minted outside the store — an externally-supplied TRACEPARENT leaves no
+// span with an empty parent, so such a trace was fetchable by id but never
+// listed. Aggregating also gives the run's true wall clock (first span start
+// to last span end) instead of the root span's own duration.
+//
+// This is a full scan of the matching rows. Bound it with ListOptions.Since;
+// a materialised view is the upgrade path once the scan stops being cheap.
+func (c *ClickHouseStore) ListTracesFiltered(ctx context.Context, opts ListOptions) ([]TraceSummary, error) {
+	limit := opts.Limit
 	if limit <= 0 {
 		limit = 100
 	}
+
+	var (
+		where []string
+		args  []any
+	)
+	if !opts.Since.IsZero() {
+		where = append(where, "Timestamp >= ?")
+		args = append(args, opts.Since)
+	}
+	if len(opts.ResourceAttrKeys) > 0 {
+		// Membership is resolved per trace, not per span: the attributes that
+		// identify a run sit on the producer's own spans, and a trace mixes
+		// producers (a Dagger run carries both CLI and engine spans, and only
+		// the CLI's resource knows it is CI). Matching per span would return
+		// half a trace.
+		sub := fmt.Sprintf(
+			"TraceId IN (SELECT DISTINCT TraceId FROM %s WHERE hasAny(mapKeys(ResourceAttributes), ?)%s)",
+			c.tracesTable, sinceClause(opts.Since),
+		)
+		where = append(where, sub)
+		args = append(args, opts.ResourceAttrKeys)
+		if !opts.Since.IsZero() {
+			args = append(args, opts.Since)
+		}
+	}
+	clause := ""
+	if len(where) > 0 {
+		clause = "WHERE " + strings.Join(where, " AND ") + "\n"
+	}
+
+	// The sort key picks the effective root, applying exactly the rule
+	// Trace.Root applies in Go: a parentless span wins over a parented one
+	// (the tuple's first element is 0 for a root, 1 otherwise), and among
+	// equals the earliest starts. Sorting on Timestamp alone would be
+	// ambiguous whenever two spans share a start instant, and would pick a
+	// child over its own root under clock skew.
+	const rootKey = "(ParentSpanId != '', Timestamp)"
 	q := fmt.Sprintf(`
-SELECT TraceId, ServiceName, SpanName,
-       Timestamp, Duration, StatusCode
-FROM %s
-WHERE ParentSpanId = ''
-ORDER BY Timestamp DESC
-LIMIT ?`, c.tracesTable)
-	rows, err := c.db.QueryContext(ctx, q, limit)
+SELECT TraceId,
+       argMin(ServiceName, %[1]s)        AS RootService,
+       argMin(SpanName, %[1]s)           AS RootName,
+       argMin(StatusCode, %[1]s)         AS RootStatus,
+       argMin(ResourceAttributes, %[1]s) AS RootResource,
+       min(Timestamp)                    AS Started,
+       max(Timestamp + toIntervalNanosecond(Duration)) AS Ended
+FROM %[2]s
+%[3]sGROUP BY TraceId
+ORDER BY Started DESC
+LIMIT ?`, rootKey, c.tracesTable, clause)
+	args = append(args, limit)
+
+	rows, err := c.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("otelstore: list traces: %w", err)
 	}
@@ -196,19 +255,18 @@ LIMIT ?`, c.tracesTable)
 	var out []TraceSummary
 	for rows.Next() {
 		var (
-			t          TraceSummary
-			ts         time.Time
-			durationNs int64
-			codeS      string
+			t             TraceSummary
+			codeS         string
+			started, ends time.Time
 		)
 		if err := rows.Scan(
-			&t.TraceID, &t.ServiceName, &t.Name,
-			&ts, &durationNs, &codeS,
+			&t.TraceID, &t.ServiceName, &t.Name, &codeS, &t.ResourceAttributes,
+			&started, &ends,
 		); err != nil {
 			return nil, fmt.Errorf("otelstore: scan trace summary: %w", err)
 		}
-		t.StartTime = ts.UTC()
-		t.EndTime = ts.Add(time.Duration(durationNs)).UTC()
+		t.StartTime = started.UTC()
+		t.EndTime = ends.UTC()
 		t.StatusCode = decodeStatusCode(codeS)
 		out = append(out, t)
 	}
@@ -216,6 +274,15 @@ LIMIT ?`, c.tracesTable)
 		return nil, fmt.Errorf("otelstore: iter trace summaries: %w", err)
 	}
 	return out, nil
+}
+
+// sinceClause returns the WHERE fragment the trace-membership subquery needs
+// so it scans the same window as the outer query instead of the whole table.
+func sinceClause(since time.Time) string {
+	if since.IsZero() {
+		return ""
+	}
+	return " AND Timestamp >= ?"
 }
 
 // decodeSpanKind translates the contrib exporter's textual SpanKind back into

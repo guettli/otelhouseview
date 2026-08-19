@@ -64,7 +64,23 @@ func funcMap() template.FuncMap {
 		"statusClass":   statusClass,
 		"sortKeys":      sortKeys,
 		"severityClass": severityClass,
+		"shortSHA":      shortSHA,
 	}
+}
+
+// shortSHA abbreviates a git object id to the 7 characters humans compare.
+// Anything that is not a full-length hex sha is returned untouched — a tag or
+// a branch name is already the readable form.
+func shortSHA(s string) string {
+	if len(s) != 40 {
+		return s
+	}
+	for _, c := range s {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+			return s
+		}
+	}
+	return s[:7]
 }
 
 func fmtTime(t time.Time) string {
@@ -239,6 +255,10 @@ type traceView struct {
 	Orphans  []*SpanNode
 	Duration time.Duration
 	HasRoot  bool
+	// ExternalParent is set when the trace's top span names a parent that is
+	// not in the store. That span is rendered as the root: the parent is not
+	// late, it was never exported.
+	ExternalParent bool
 }
 
 // RenderTrace produces the standalone HTML page for a single trace. It does
@@ -246,21 +266,51 @@ type traceView struct {
 // snapshot it as a static file.
 func RenderTrace(trace otelstore.Trace) ([]byte, error) {
 	root, orphans := buildTree(trace)
-	view := traceView{TraceID: trace.TraceID, Root: root, Orphans: orphans}
+	// One orphan and no root is not a partial trace, it is a whole trace whose
+	// parent context was minted elsewhere — a CI workflow injecting its own
+	// TRACEPARENT produces exactly this, and the parent it names will never
+	// arrive. Render that span as the root instead of telling the reader to
+	// wait for something that is not coming.
+	externalParent := false
+	if root == nil && len(orphans) == 1 {
+		root, orphans, externalParent = orphans[0], nil, true
+	}
+	view := traceView{TraceID: trace.TraceID, Root: root, Orphans: orphans, ExternalParent: externalParent}
 	if root != nil {
 		view.HasRoot = true
-		view.Duration = root.Span.Duration()
 		view.Flat = flatten(root)
 	}
 	for _, o := range orphans {
 		view.Flat = append(view.Flat, flatten(o)...)
 	}
+	// The wall clock of everything rendered, not the root span's own duration:
+	// identical for a well-formed trace (the root encloses its children) and
+	// correct for one that is still missing spans.
+	view.Duration = spanWindow(view.Flat)
 	layoutWaterfall(view.Flat)
 	var buf bytes.Buffer
 	if err := traceTmpl.Execute(&buf, view); err != nil {
 		return nil, fmt.Errorf("ciview: render trace: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// spanWindow returns the wall clock from the earliest span start to the latest
+// span end across nodes.
+func spanWindow(nodes []*SpanNode) time.Duration {
+	var start, end time.Time
+	for _, n := range nodes {
+		if start.IsZero() || n.Span.StartTime.Before(start) {
+			start = n.Span.StartTime
+		}
+		if end.IsZero() || n.Span.EndTime.After(end) {
+			end = n.Span.EndTime
+		}
+	}
+	if start.IsZero() {
+		return 0
+	}
+	return end.Sub(start)
 }
 
 // layoutWaterfall assigns each node its OffsetPct and WidthPct against the
@@ -307,12 +357,65 @@ func layoutWaterfall(nodes []*SpanNode) {
 	}
 }
 
-// RenderIndex produces the list page shown at /ci/. Traces without a root span
-// are filtered out upstream by the store, but the renderer is tolerant of
-// either input.
+// vcsAttrs lists, per column, the resource-attribute keys that can carry a
+// run's provenance, most specific first.
+//
+// The ci.* keys are what a workflow sets deliberately; the dagger.io/* keys
+// are what the Dagger CLI stamps on its own. Both are read so a run is
+// labelled whether or not its workflow was updated — and the deliberate key
+// wins, because the Dagger one is derived from the checkout and on a
+// pull_request that is a merge commit nobody can look up.
+var vcsAttrs = struct{ Repo, Branch, Commit []string }{
+	Repo:   []string{"ci.repo", "dagger.io/vcs.repo.full_name"},
+	Branch: []string{"ci.branch", "dagger.io/git.branch"},
+	Commit: []string{"ci.commit", "dagger.io/git.ref"},
+}
+
+// indexRow is one line of the listing: the store's summary plus the run
+// provenance pulled out of its resource attributes.
+type indexRow struct {
+	otelstore.TraceSummary
+	Repo   string
+	Branch string
+	Commit string
+}
+
+// indexData is what the index template renders.
+type indexData struct {
+	Rows []indexRow
+	// ShowVCS keeps the repo / branch / commit columns off the page entirely
+	// when nothing in the listing has them, rather than showing three empty
+	// columns to a deployment whose producers are not CI pipelines.
+	ShowVCS bool
+}
+
+// firstAttr returns the value of the first key present in attrs.
+func firstAttr(attrs map[string]string, keys []string) string {
+	for _, k := range keys {
+		if v, ok := attrs[k]; ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// RenderIndex produces the list page shown at /ci/.
 func RenderIndex(summaries []otelstore.TraceSummary) ([]byte, error) {
+	data := indexData{Rows: make([]indexRow, 0, len(summaries))}
+	for _, s := range summaries {
+		r := indexRow{
+			TraceSummary: s,
+			Repo:         firstAttr(s.ResourceAttributes, vcsAttrs.Repo),
+			Branch:       firstAttr(s.ResourceAttributes, vcsAttrs.Branch),
+			Commit:       firstAttr(s.ResourceAttributes, vcsAttrs.Commit),
+		}
+		if r.Repo != "" || r.Branch != "" || r.Commit != "" {
+			data.ShowVCS = true
+		}
+		data.Rows = append(data.Rows, r)
+	}
 	var buf bytes.Buffer
-	if err := indexTmpl.Execute(&buf, summaries); err != nil {
+	if err := indexTmpl.Execute(&buf, data); err != nil {
 		return nil, fmt.Errorf("ciview: render index: %w", err)
 	}
 	return buf.Bytes(), nil

@@ -37,6 +37,7 @@
     min-height: 100vh;
   }
   code { font-family: var(--mono); }
+  td.vcs { color: var(--text-muted); white-space: nowrap; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; }
   h1 { font-size: 1.4rem; font-weight: 600; margin: 0 0 1.25rem 0; letter-spacing: -0.01em; }
   .card {
     background: var(--bg-elev);
@@ -103,18 +104,29 @@
 </head>
 <body>
 <h1>CI runs</h1>
-{{ if . }}
+{{ if .Rows }}
 <div class="card">
 <table>
   <thead>
-    <tr><th>status</th><th>service</th><th>pipeline</th><th>started</th><th>duration</th><th>trace</th></tr>
+    <tr>
+      <th>status</th>
+      <th>service</th>
+      <th>pipeline</th>
+      {{ if .ShowVCS }}<th>repo</th><th>branch</th><th>commit</th>{{ end }}
+      <th>started</th><th>duration</th><th>trace</th>
+    </tr>
   </thead>
   <tbody>
-  {{ range . }}
+  {{ range .Rows }}
     <tr>
       <td class="status"><span class="status-pill {{ statusClass .StatusCode }}">{{ statusLabel .StatusCode }}</span></td>
       <td>{{ .ServiceName }}</td>
       <td>{{ .Name }}</td>
+      {{ if $.ShowVCS }}
+      <td class="vcs">{{ .Repo }}</td>
+      <td class="vcs">{{ .Branch }}</td>
+      <td class="vcs">{{ with .Commit }}<code title="{{ . }}">{{ shortSHA . }}</code>{{ end }}</td>
+      {{ end }}
       <td>{{ fmtTime .StartTime }}</td>
       <td>{{ fmtDuration (.EndTime.Sub .StartTime) }}</td>
       <td class="trace"><a href="./{{ .TraceID }}"><code>{{ .TraceID }}</code></a></td>
