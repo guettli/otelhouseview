@@ -124,6 +124,45 @@ func TestRenderIndexOmitsVCSColumnsWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestRepoName(t *testing.T) {
+	for in, want := range map[string]string{
+		// Already a name.
+		"guettli/agentloop": "guettli/agentloop",
+		// The forms dagger.io/git.remote takes.
+		"github.com/guettli/sharedinbox":       "guettli/sharedinbox",
+		"https://github.com/guettli/agentloop": "guettli/agentloop",
+		"git@github.com:guettli/agentloop.git": "guettli/agentloop",
+		"ssh://git@github.com/guettli/x.git":   "guettli/x",
+		// A deeper path keeps every segment below the host.
+		"https://gitlab.com/group/sub/proj": "group/sub/proj",
+		"":                                  "",
+	} {
+		if got := repoName(in); got != want {
+			t.Errorf("repoName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRenderIndexFallsBackToGitRemoteForRepo(t *testing.T) {
+	t0 := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	got, err := RenderIndex([]otelstore.TraceSummary{{
+		TraceID:     "00112233445566778899aabbccddeeff",
+		ServiceName: "dagger-cli",
+		Name:        "check",
+		StartTime:   t0,
+		EndTime:     t0.Add(time.Second),
+		// Dagger sets vcs.repo.full_name only on some CI events; git.remote is
+		// set on all of them.
+		ResourceAttributes: map[string]string{"dagger.io/git.remote": "github.com/guettli/sharedinbox"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "guettli/sharedinbox") {
+		t.Errorf("repo column blank when only dagger.io/git.remote is set")
+	}
+}
+
 func TestShortSHA(t *testing.T) {
 	for in, want := range map[string]string{
 		"97b256d5ea92c7ebf68ebadcab2a532276a3bf52": "97b256d",

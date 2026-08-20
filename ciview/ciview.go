@@ -366,7 +366,11 @@ func layoutWaterfall(nodes []*SpanNode) {
 // wins, because the Dagger one is derived from the checkout and on a
 // pull_request that is a merge commit nobody can look up.
 var vcsAttrs = struct{ Repo, Branch, Commit []string }{
-	Repo:   []string{"ci.repo", "dagger.io/vcs.repo.full_name"},
+	// dagger.io/git.remote is the last resort because it is a URL, not a
+	// name — but Dagger sets vcs.repo.full_name only on some CI events and
+	// git.remote on all of them (136 of 181 vs 181 of 181, measured on the
+	// live store), so without it a quarter of the listing had a blank repo.
+	Repo:   []string{"ci.repo", "dagger.io/vcs.repo.full_name", "dagger.io/git.remote"},
 	Branch: []string{"ci.branch", "dagger.io/git.branch"},
 	Commit: []string{"ci.commit", "dagger.io/git.ref"},
 }
@@ -399,13 +403,34 @@ func firstAttr(attrs map[string]string, keys []string) string {
 	return ""
 }
 
+// repoHostPrefixes are the leading forms a git remote takes for the same
+// repository. Trimming them makes a remote-derived repo read like the
+// owner/name every other source of this column produces.
+var repoHostPrefixes = []string{"https://", "http://", "ssh://git@", "git@"}
+
+// repoName reduces a git remote to owner/name. A value that is already a
+// name is returned unchanged.
+func repoName(v string) string {
+	for _, p := range repoHostPrefixes {
+		v = strings.TrimPrefix(v, p)
+	}
+	v = strings.TrimSuffix(v, ".git")
+	// Drop the host, keeping everything after it: GitHub is owner/name, but a
+	// GitLab path can be deeper than that and truncating it would merge
+	// distinct repositories into one label.
+	if i := strings.IndexAny(v, "/:"); i >= 0 && strings.Contains(v[:i], ".") {
+		v = v[i+1:]
+	}
+	return v
+}
+
 // RenderIndex produces the list page shown at /ci/.
 func RenderIndex(summaries []otelstore.TraceSummary) ([]byte, error) {
 	data := indexData{Rows: make([]indexRow, 0, len(summaries))}
 	for _, s := range summaries {
 		r := indexRow{
 			TraceSummary: s,
-			Repo:         firstAttr(s.ResourceAttributes, vcsAttrs.Repo),
+			Repo:         repoName(firstAttr(s.ResourceAttributes, vcsAttrs.Repo)),
 			Branch:       firstAttr(s.ResourceAttributes, vcsAttrs.Branch),
 			Commit:       firstAttr(s.ResourceAttributes, vcsAttrs.Commit),
 		}
