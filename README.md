@@ -216,4 +216,59 @@ which is a stronger check than a human looking at a page of made-up data.
 engine). `make ui-build` builds the report locally against the committed sample
 data. The report renders offline — it is one HTML file with everything inlined.
 
+## Integrating otelhouseview into your own app
+
+otelhouseview is three seams you can adopt independently — **ingest → serve →
+render**. Each works today; pick the depth you need.
+
+### 1. Ingest OTel data into ClickHouse
+
+otelhouseview only ever *reads* ClickHouse (see [Safety model](#safety-model-the-dsn-is-the-boundary)); something else has to write the telemetry in.
+
+- **Recommended: the [otelhouse](https://github.com/guettli/otelhouse) gateway.**
+  It stamps `ResourceAttributes['tenant']` from a verified token, fail-closed,
+  which is exactly the boundary the per-tenant `<tenant>_ro` DSN relies on (see
+  lines above). Use it and the read side is safe by construction.
+- **Alternative: the upstream OTel Collector `clickhouseexporter` directly.**
+  `ci/otel-collector-config.yaml` is a working config; it writes the stock
+  tables (`otel_logs`, `otel_traces`,
+  `otel_metrics_{gauge,sum,histogram,exponential_histogram,summary}`). You are
+  then responsible for however you establish the tenant boundary.
+
+### 2. Serve queries with the Go server
+
+- **Standalone binary.** Build and run `cmd/otelhouseview` against a read-only
+  ClickHouse DSN; it is a thin wrapper that serves the API and the embedded SPA
+  at `/`.
+- **Embed the handler in your Go app.** Import the `explore` package and mount
+  it — `explore.New(ctx, explore.Config{…})` returns an `http.Handler`; this is
+  how agentloop hosts it in production. The query internals live under
+  `explore/internal/{ch,store,httpapi,starters}`, with the shipped starter
+  queries in `explore/internal/starters`.
+- **Lower-commitment entry points.** If you only need trace lookup or a
+  self-contained waterfall render, the [`otelstore` + `ciview`](#go-library-otelstore--ciview)
+  libraries are smaller seams that do not require standing up the full server.
+
+### 3. Render with the Svelte UI
+
+Both frontends are Svelte 5; the boundary is delivery, not framework.
+
+- **Live SPA (`explore/web/`).** This is the frontend the Go server serves,
+  embedded via `go:embed` (`explore/embed.go`), so a standalone binary or an
+  `explore`-embedding host gets it for free. Building a separate frontend
+  instead? Reuse `explore/web/src/lib/chartOption.ts` and `explore/web/src/lib/api.ts`
+  against your own backend. Rebuild with `make web`.
+- **Static report (`ui/`).** Run `make ui-build` and host the single
+  `ui/dist/index.html`. `ui/src/lib/report.ts` is the schema contract with the
+  Go builder — conform your data to `Report` and the same components render it;
+  `ui/src/lib/Sparkline.svelte` and `ui/src/lib/StackedTimeSeries.svelte` are
+  drop-in chart primitives.
+
+### Two non-negotiables
+
+- ClickHouse access is **read-only**; execution limits live on the server-side
+  ClickHouse user profile, never in this code.
+- Saved-query parameters use native `{name:Type}` binding — **never** string
+  interpolation.
+
 See [docs/DESIGN.md](docs/DESIGN.md) for the architecture and the decisions behind it.
