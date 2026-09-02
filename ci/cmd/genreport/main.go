@@ -6,7 +6,11 @@
 // It fails loudly on any query error rather than emitting a partial report — a
 // truncated report would look successful while hiding a broken pipeline.
 //
-// Usage: genreport -dsn clickhouse://... -out report.json
+// Usage: genreport -dsn clickhouse://... -out report.json [-assert]
+//
+// With -assert it also fails (non-zero exit) if any seeded signal came back
+// empty — the e2e's proof that data actually round-tripped
+// collector → ClickHouse → query (issue #2).
 package main
 
 import (
@@ -15,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -79,8 +84,9 @@ type traceRow struct {
 
 func main() {
 	var (
-		dsn = flag.String("dsn", os.Getenv("CLICKHOUSE_DSN"), "ClickHouse DSN (clickhouse://user:pass@host:9000/db)")
-		out = flag.String("out", "report.json", "output path for report.json")
+		dsn    = flag.String("dsn", os.Getenv("CLICKHOUSE_DSN"), "ClickHouse DSN (clickhouse://user:pass@host:9000/db)")
+		out    = flag.String("out", "report.json", "output path for report.json")
+		assert = flag.Bool("assert", false, "fail (non-zero exit) if any seeded signal is empty — the e2e proof that data round-tripped collector→ClickHouse→query")
 	)
 	flag.Parse()
 	if *dsn == "" {
@@ -103,6 +109,12 @@ func main() {
 	rep, err := build(ctx, conn)
 	if err != nil {
 		fatal("build report: %v", err)
+	}
+
+	if *assert {
+		if err := assertSeeded(rep); err != nil {
+			fatal("assert: %v", err)
+		}
 	}
 
 	blob, err := json.MarshalIndent(rep, "", "  ")
@@ -295,6 +307,43 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// assertSeeded checks that every signal the e2e harness seeds actually
+// round-tripped OTLP → collector → ClickHouse → query. Without it the pipeline
+// would happily render an empty report if the collector never flushed or a
+// starter query silently returned nothing — the failure mode issue #2 exists to
+// catch. Reports every empty signal at once so a flush/schema regression is
+// diagnosed in one run rather than whack-a-mole.
+func assertSeeded(rep *report) error {
+	var empty []string
+	if rep.Summary.Logs == 0 {
+		empty = append(empty, "logs")
+	}
+	if rep.Summary.Spans == 0 {
+		empty = append(empty, "spans")
+	}
+	if rep.Summary.Traces == 0 {
+		empty = append(empty, "traces")
+	}
+	if rep.Summary.MetricPoints == 0 {
+		empty = append(empty, "metricPoints")
+	}
+	// The summary counts prove ingestion; the derived slices prove the starter
+	// queries that back the report's charts return rows too.
+	if len(rep.Metrics) == 0 {
+		empty = append(empty, "metrics[] (metric starter query)")
+	}
+	if len(rep.Traces) == 0 {
+		empty = append(empty, "traces[] (trace starter query)")
+	}
+	if len(rep.LogVolume) == 0 {
+		empty = append(empty, "logVolume[] (log starter query)")
+	}
+	if len(empty) > 0 {
+		return fmt.Errorf("seeded signals came back empty: %s — collector flush or a starter query is broken", strings.Join(empty, ", "))
+	}
+	return nil
 }
 
 func fatal(format string, args ...any) {

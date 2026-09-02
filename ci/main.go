@@ -260,6 +260,6 @@ echo "[e2e] waiting for collector to flush rows to clickhouse"
 sleep 4
 
 echo "[e2e] building report.json from clickhouse"
-/usr/local/bin/genreport -dsn "$CLICKHOUSE_DSN" -out /out/report.json
+/usr/local/bin/genreport -assert -dsn "$CLICKHOUSE_DSN" -out /out/report.json
 echo "[e2e] report.json ready"
 `
