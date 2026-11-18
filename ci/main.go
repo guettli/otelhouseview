@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"dagger.io/dagger"
+	"dagger.io/dagger/core"
 )
 
 // Pinned upstream OTel Collector contrib image. Drives the clickhouseexporter
@@ -50,15 +51,18 @@ func main() {
 }
 
 func pipeline(ctx context.Context) error {
-	client, err := dagger.Connect(ctx, dagger.WithLogOutput(os.Stderr))
+	conn, err := dagger.Connect(ctx, dagger.WithLogOutput(os.Stderr))
 	if err != nil {
 		return fmt.Errorf("dagger connect: %w", err)
 	}
-	defer func() { _ = client.Close() }()
+	defer func() { _ = conn.Close() }()
+	// Since v1.0 the generated API lives in dagger.io/dagger/core; the
+	// dagger.Client is only the connection.
+	client := core.NewQuery(conn)
 
 	// Mount the repo. Exclude heavy/irrelevant trees so the build context stays
 	// small and node_modules from a local run never leaks into the container.
-	src := client.Host().Directory("..", dagger.HostDirectoryOpts{
+	src := client.Host().Directory("..", core.HostDirectoryOpts{
 		Exclude: []string{".git/", "ui/node_modules/", "ui/dist/", "explore/web/node_modules/"},
 	})
 
@@ -157,12 +161,12 @@ func pipeline(ctx context.Context) error {
 // the collector as a background process inside one container avoids that.
 func runE2E(
 	ctx context.Context,
-	client *dagger.Client,
-	clickhouse *dagger.Service,
+	client *core.Query,
+	clickhouse *core.Service,
 	clickhouseDSN string,
-	src *dagger.Directory,
-	goBase *dagger.Container,
-) (*dagger.File, error) {
+	src *core.Directory,
+	goBase *core.Container,
+) (*core.File, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
@@ -193,7 +197,7 @@ func runE2E(
 // explore/web/. The vitest suite covers autoViz.ts (the auto-chart heuristic on
 // which the whole "grid or line" UX pivots) and api.ts (the mount-base URL
 // building that lets a host app mount explore under any prefix).
-func runWebTests(ctx context.Context, client *dagger.Client, src *dagger.Directory) (*dagger.Container, error) {
+func runWebTests(ctx context.Context, client *core.Query, src *core.Directory) (*core.Container, error) {
 	pnpmStore := client.CacheVolume("otelhouseview-pnpm-store")
 	return client.Container().
 		From("node:22-alpine").
@@ -209,7 +213,7 @@ func runWebTests(ctx context.Context, client *dagger.Client, src *dagger.Directo
 
 // buildReport bakes report.json into ui/src/lib/report-data.json and runs the
 // Vite/Svelte build, returning the single self-contained dist/index.html.
-func buildReport(client *dagger.Client, src *dagger.Directory, reportJSON *dagger.File) *dagger.File {
+func buildReport(client *core.Query, src *core.Directory, reportJSON *core.File) *core.File {
 	pnpmStore := client.CacheVolume("otelhouseview-pnpm-store")
 	return client.Container().
 		From("node:22-alpine").
