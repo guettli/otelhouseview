@@ -22,7 +22,7 @@ concurrency:
 
 env:
   # Keep in sync with dagger.io/dagger in ci/go.mod.
-  DAGGER_ENGINE_VERSION: v0.21.7
+  DAGGER_ENGINE_VERSION: v1.0.0-beta.27
 
 jobs:
   ci:

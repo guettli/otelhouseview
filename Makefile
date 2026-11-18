@@ -3,7 +3,7 @@
 # implies a green CI run. Do not add a second test path (docker-compose etc).
 #
 # The pipeline needs a reachable Dagger engine. Point the Dagger SDK at a remote
-# engine by exporting _EXPERIMENTAL_DAGGER_RUNNER_HOST before running; it is
+# engine by exporting DAGGER_ENGINE before running; it is
 # inherited by `go run` below. The cluster upload step is skipped unless
 # OTELHOUSEVIEW_UPLOAD=1 (CI sets it only on pushes to main).
 
