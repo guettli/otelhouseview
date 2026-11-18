@@ -1,2 +1,7 @@
 /bin/
 *.db
+
+# Written by the Dagger 1.0 CLI next to dagger.json/the SDK call; not ours to pin.
+/dagger.lock
+# Rendered by a local `cd ci && go run .` (CI uploads it instead).
+/ci/report/
